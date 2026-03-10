@@ -237,7 +237,7 @@ class TestXAIFeatureAttribution(unittest.TestCase):
         result = self.detector.predict_one(_dos_flow())
         self.assertIn("top_features", result)
         self.assertGreater(len(result["top_features"]), 0)
-        self.assertLessEqual(len(result["top_features"]), 10)
+        self.assertLessEqual(len(result["top_features"]), 31)  # top-15 + up to 4 must-show extras
         for feat in result["top_features"]:
             self.assertIn("feature", feat)
             self.assertIn("contribution", feat)

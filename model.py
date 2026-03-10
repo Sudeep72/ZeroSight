@@ -334,12 +334,18 @@ class ZeroSightDetector:
         # SHAP-style: feature contribution = |scaled_value| * feature_importance
         importances = np.array([self.meta["feature_importances"].get(f, 0) for f in FEATURES])
         contributions = np.abs(vec_scaled[0]) * importances
-        top_features = sorted(
-            [{"feature": FEATURES[i], "contribution": round(float(contributions[i]), 4),
-              "value": round(float(vec[0][i]), 4)}
-             for i in range(len(FEATURES))],
-            key=lambda x: x["contribution"], reverse=True
-        )[:10]
+        all_features = [{"feature": FEATURES[i], "contribution": round(float(contributions[i]), 4),
+                          "value": round(float(vec[0][i]), 4)}
+                         for i in range(len(FEATURES))]
+        top_features = sorted(all_features, key=lambda x: x["contribution"], reverse=True)[:15]
+
+        # Always ensure key rate features appear (even if outside top-15)
+        # so the deviation table can always show their contribution
+        must_show = {'Flow Packets/s', 'Flow Bytes/s', 'Bwd Packets/s', 'Fwd Packets/s'}
+        top_names = {t['feature'] for t in top_features}
+        for feat_entry in all_features:
+            if feat_entry['feature'] in must_show and feat_entry['feature'] not in top_names:
+                top_features.append(feat_entry)
 
         severity = _severity(threat_score, rf_label)
 

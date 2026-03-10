@@ -863,7 +863,7 @@ footer {
 // ═══════════════════════════════════════════════════════
 // CONFIG
 // ═══════════════════════════════════════════════════════
-const API_BASE = window.location.origin;
+const API_BASE = 'http://localhost:8000';
 
 // ═══════════════════════════════════════════════════════
 // STATE
@@ -1614,14 +1614,15 @@ function renderSingleResult(data, flow, ms) {
     if (el) el.style.strokeDashoffset = off;
   }, 50);
 
-  // XAI
-  const feats = data.top_features || [];
+  // XAI — show top 10 bars visually; full list kept in data.top_features for contrib() lookups
+  const feats    = data.top_features || [];
+  const featDisp = feats.slice(0, 10);  // display top 10 only
   const maxC  = Math.max(...feats.map(f => f.contribution), 0.001);
   const xCols = ['#ff3a5c','#ffb830','#b060ff','#00c8ff','#00ff88','#ff6b35','#4dd9ff','#ff94c8','#a0ff4d','#ffd23f'];
-  document.getElementById('xaiPanel').innerHTML = feats.length === 0
+  document.getElementById('xaiPanel').innerHTML = featDisp.length === 0
     ? `<div class="ph"><div class="phi">🧠</div>No features returned from API</div>`
     : `<div class="shap-list">
-        ${feats.map((f,i) => `
+        ${featDisp.map((f,i) => `
           <div class="shap-row" id="sr${i}">
             <div class="shap-name">${f.feature}</div>
             <div class="shap-track"><div class="shap-fill" id="sf${i}" style="background:${xCols[i%xCols.length]}"></div></div>
@@ -1629,7 +1630,7 @@ function renderSingleResult(data, flow, ms) {
           </div>`).join('')}
       </div>
       <div class="xai-verdict"><strong>XAI Explanation:</strong> ${buildVerdict(data, si)}</div>`;
-  feats.forEach((f,i) => setTimeout(() => {
+  featDisp.forEach((f,i) => setTimeout(() => {
     document.getElementById('sr'+i)?.classList.add('vis');
     const b = document.getElementById('sf'+i);
     if (b) b.style.width = (f.contribution/maxC*100)+'%';
@@ -1694,8 +1695,8 @@ function renderProtoTable(data, flow, ms) {
   const ackDev       = totalPkts > 0 ? Math.abs(ack - ackExpected) / Math.max(ackExpected, 1) : 0;
   const ackStatus    = ackDev > 0.5 ? 'ANOMALOUS' : ackDev > 0.2 ? 'SUSPICIOUS' : 'NORMAL';
   const ackClass     = ackDev > 0.5 ? 't-anom'   : ackDev > 0.2 ? 't-susp'     : 't-norm';
-  const synStatus    = syn > 2 ? 'ANOMALOUS' : 'NORMAL';
-  const synClass     = syn > 2 ? 't-anom'    : 't-norm';
+  const synStatus    = syn > 8 ? 'ANOMALOUS' : syn > 3 ? 'SUSPICIOUS' : 'NORMAL';
+  const synClass     = syn > 8 ? 't-anom'    : syn > 3 ? 't-susp'     : 't-norm';
   const rawScore     = data.if_raw_score || 0;
   // IF raw threshold from meta (server returns this in data or use default)
   const rawThresh    = data.if_threshold || 0.50;
