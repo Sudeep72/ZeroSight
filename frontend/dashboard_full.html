@@ -1338,183 +1338,682 @@ function renderBatchResults(results, ms) {
 // ═══════════════════════════════════════════════════════
 // MANUAL PREDICT
 // ═══════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════
+// SCENARIOS — all values internally consistent:
+//   flow_packets_per_s  = (fwd_pkts + bwd_pkts) / (flow_duration / 1e6)
+//   flow_bytes_per_s    = (total_len_fwd + total_len_bwd) / (flow_duration / 1e6)
+//   fwd_packets_per_s   = fwd_pkts / (flow_duration / 1e6)
+//   bwd_packets_per_s   = bwd_pkts / (flow_duration / 1e6)
+//   fwd_pkt_len_mean    = total_len_fwd / fwd_pkts
+//   bwd_pkt_len_mean    = total_len_bwd / bwd_pkts
+//   packet_length_mean  ≈ (total_len_fwd + total_len_bwd) / (fwd_pkts + bwd_pkts)
+//   packet_length_variance = packet_length_std²
+//   avg_fwd_segment_size ≈ fwd_pkt_len_mean
+//   avg_bwd_segment_size ≈ bwd_pkt_len_mean
+//   average_packet_size  ≈ packet_length_mean
+//   flow_iat_mean ≈ flow_duration / (fwd_pkts + bwd_pkts - 1)
+// ═══════════════════════════════════════════════════════
+
 const SCENARIOS = {
-  benign: { desc:'Normal HTTPS browsing. Expected: CLEAN (score 0–5).',
-    flow_duration:5000000, total_fwd_packets:15, total_backward_packets:12,
-    total_length_fwd_packets:7932, total_length_bwd_packets:14960,
-    fwd_packet_length_mean:500, bwd_packet_length_mean:797, flow_bytes_per_s:17231, flow_packets_per_s:18,
-    flow_iat_mean:299223, flow_iat_std:207338, flow_iat_max:1426202,
-    fwd_iat_mean:375136, bwd_iat_mean:376825, fwd_packets_per_s:9, bwd_packets_per_s:9,
-    packet_length_mean:651, packet_length_std:166, packet_length_variance:36396, fin_flag_count:0,
-    syn_flag_count:0, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:657, avg_fwd_segment_size:497, avg_bwd_segment_size:792,
-    init_win_bytes_forward:54237, init_win_bytes_backward:57003, active_mean:471669, idle_mean:1962176,
+
+  // ── BENIGN ─────────────────────────────────────────────────────────────────
+  // Normal HTTPS: ~5s session, 27 pkts, balanced fwd/bwd, large varied payloads
+  // dur=5,000,000µs  fwd=15 bwd=12 total=27
+  // bytes_fwd=7500 bytes_bwd=9564 total=17064
+  // pps = 27/5 = 5.4    bps = 17064/5 = 3413
+  // fwd_mean=500 bwd_mean=797  pkt_mean=632
+  // iat_mean = 5000000/26 ≈ 192308
+  benign: {
+    desc: 'Normal HTTPS browsing. Expected: CLEAN (score 0–10).',
+    flow_duration:             5000000,
+    total_fwd_packets:              15,
+    total_backward_packets:         12,
+    total_length_fwd_packets:     7500,
+    total_length_bwd_packets:     9564,
+    fwd_packet_length_mean:        500,
+    bwd_packet_length_mean:        797,
+    flow_bytes_per_s:             3413,   // 17064/5
+    flow_packets_per_s:            5.4,   // 27/5
+    flow_iat_mean:              192308,   // 5000000/26
+    flow_iat_std:               120000,
+    flow_iat_max:              1400000,
+    fwd_iat_mean:               357143,   // 5000000/14
+    bwd_iat_mean:               454545,   // 5000000/11
+    fwd_packets_per_s:             3.0,   // 15/5
+    bwd_packets_per_s:             2.4,   // 12/5
+    packet_length_mean:            632,   // 17064/27
+    packet_length_std:             166,
+    packet_length_variance:      27556,   // 166²
+    fin_flag_count:                  1,
+    syn_flag_count:                  1,
+    rst_flag_count:                  0,
+    psh_flag_count:                  1,
+    ack_flag_count:                  1,
+    average_packet_size:           632,
+    avg_fwd_segment_size:          500,
+    avg_bwd_segment_size:          797,
+    init_win_bytes_forward:      54237,
+    init_win_bytes_backward:     57003,
+    active_mean:                471669,
+    idle_mean:                 1962176,
   },
-  dos: { desc:'DoS Hulk — HTTP flood, 800K pkt/s, IAT=200µs. Expected: CRITICAL (score ~100).',
-    flow_duration:2993, total_fwd_packets:2472, total_backward_packets:15,
-    total_length_fwd_packets:1498512, total_length_bwd_packets:1805,
-    fwd_packet_length_mean:602, bwd_packet_length_mean:279, flow_bytes_per_s:14823700, flow_packets_per_s:800466,
-    flow_iat_mean:202, flow_iat_std:100, flow_iat_max:999,
-    fwd_iat_mean:199513, bwd_iat_mean:198724, fwd_packets_per_s:598913, bwd_packets_per_s:25,
-    packet_length_mean:396, packet_length_std:202, packet_length_variance:40297, fin_flag_count:0,
-    syn_flag_count:1, rst_flag_count:0, psh_flag_count:0, ack_flag_count:0,
-    average_packet_size:395, avg_fwd_segment_size:601, avg_bwd_segment_size:278,
-    init_win_bytes_forward:98, init_win_bytes_backward:16185, active_mean:1012, idle_mean:500,
+
+  // ── DoS HULK ───────────────────────────────────────────────────────────────
+  // HTTP flood: 3ms flow, 2487 pkts, 800K pkt/s
+  // dur=2993µs  fwd=2472 bwd=15 total=2487
+  // bytes_fwd=1487736(602×2472) bytes_bwd=4185(279×15) total=1491921
+  // pps = 2487/0.002993 = 830,971  bps = 1491921/0.002993 = 498,640,161
+  // iat_mean = 2993/2486 ≈ 1.2µs
+  dos: {
+    desc: 'DoS Hulk — HTTP flood, 830K pkt/s, IAT≈1µs. Expected: CRITICAL (score ~100).',
+    flow_duration:               2993,
+    total_fwd_packets:           2472,
+    total_backward_packets:        15,
+    total_length_fwd_packets:  1487736,   // 602×2472
+    total_length_bwd_packets:     4185,   // 279×15
+    fwd_packet_length_mean:        602,
+    bwd_packet_length_mean:        279,
+    flow_bytes_per_s:         498640161,  // 1491921/0.002993
+    flow_packets_per_s:          830971,  // 2487/0.002993
+    flow_iat_mean:                  1.2,  // 2993/2486
+    flow_iat_std:                   0.8,
+    flow_iat_max:                  1500,
+    fwd_iat_mean:                   1.2,
+    bwd_iat_mean:                 213.8,  // 2993/14
+    fwd_packets_per_s:           825761,  // 2472/0.002993
+    bwd_packets_per_s:             5013,  // 15/0.002993
+    packet_length_mean:             600,  // 1491921/2487
+    packet_length_std:              202,
+    packet_length_variance:       40804,  // 202²
+    fin_flag_count:                   0,
+    syn_flag_count:                   1,
+    rst_flag_count:                   0,
+    psh_flag_count:                   0,
+    ack_flag_count:                   0,
+    average_packet_size:            600,
+    avg_fwd_segment_size:           602,
+    avg_bwd_segment_size:           279,
+    init_win_bytes_forward:          98,
+    init_win_bytes_backward:      16185,
+    active_mean:                   1012,
+    idle_mean:                      500,
   },
-  portscan: { desc:'Stealth SYN scan — 1 pkt, 40 bytes, SYN+RST, 150µs. Expected: CRITICAL (score ~80).',
-    flow_duration:150, total_fwd_packets:1, total_backward_packets:0,
-    total_length_fwd_packets:40, total_length_bwd_packets:0,
-    fwd_packet_length_mean:40, bwd_packet_length_mean:0, flow_bytes_per_s:251860, flow_packets_per_s:6500,
-    flow_iat_mean:199, flow_iat_std:50, flow_iat_max:201,
-    fwd_iat_mean:199435, bwd_iat_mean:199498, fwd_packets_per_s:5996, bwd_packets_per_s:0,
-    packet_length_mean:40, packet_length_std:5, packet_length_variance:25, fin_flag_count:0,
-    syn_flag_count:1, rst_flag_count:1, psh_flag_count:0, ack_flag_count:0,
-    average_packet_size:402, avg_fwd_segment_size:303, avg_bwd_segment_size:279,
-    init_win_bytes_forward:102, init_win_bytes_backward:33115, active_mean:503, idle_mean:995,
+
+  // ── PORT SCAN ──────────────────────────────────────────────────────────────
+  // Stealth SYN: 1 pkt, 150µs, SYN+RST, zero backward
+  // dur=150µs  fwd=1 bwd=0 total=1
+  // bytes_fwd=40 total=40
+  // pps = 1/0.000150 = 6667   bps = 40/0.000150 = 266667
+  // iat_mean = 0 (only 1 pkt)
+  portscan: {
+    desc: 'Stealth SYN scan — 1 pkt, 40 bytes, SYN+RST, 150µs. Expected: CRITICAL (score ~85).',
+    flow_duration:                150,
+    total_fwd_packets:              1,
+    total_backward_packets:         0,
+    total_length_fwd_packets:      40,
+    total_length_bwd_packets:       0,
+    fwd_packet_length_mean:        40,
+    bwd_packet_length_mean:         0,
+    flow_bytes_per_s:          266667,   // 40/0.000150
+    flow_packets_per_s:          6667,   // 1/0.000150
+    flow_iat_mean:                  0,   // single packet — no IAT
+    flow_iat_std:                   0,
+    flow_iat_max:                   0,
+    fwd_iat_mean:                   0,
+    bwd_iat_mean:                   0,
+    fwd_packets_per_s:           6667,
+    bwd_packets_per_s:              0,
+    packet_length_mean:            40,
+    packet_length_std:              0,
+    packet_length_variance:         0,
+    fin_flag_count:                 0,
+    syn_flag_count:                 1,
+    rst_flag_count:                 1,
+    psh_flag_count:                 0,
+    ack_flag_count:                 0,
+    average_packet_size:           40,
+    avg_fwd_segment_size:          40,
+    avg_bwd_segment_size:           0,
+    init_win_bytes_forward:       102,
+    init_win_bytes_backward:        0,
+    active_mean:                    0,
+    idle_mean:                      0,
   },
-  ddos: { desc:'DDoS flood — 25-byte pkts, 600K pkt/s, SYN. Expected: CRITICAL (score ~90).',
-    flow_duration:4992, total_fwd_packets:2993, total_backward_packets:14,
-    total_length_fwd_packets:2189, total_length_bwd_packets:1781,
-    fwd_packet_length_mean:25, bwd_packet_length_mean:0, flow_bytes_per_s:19958993, flow_packets_per_s:595995,
-    flow_iat_mean:149, flow_iat_std:51, flow_iat_max:800182,
-    fwd_iat_mean:199444, bwd_iat_mean:198295, fwd_packets_per_s:30, bwd_packets_per_s:25,
-    packet_length_mean:25, packet_length_std:3, packet_length_variance:9, fin_flag_count:0,
-    syn_flag_count:1, rst_flag_count:0, psh_flag_count:1, ack_flag_count:0,
-    average_packet_size:401, avg_fwd_segment_size:298, avg_bwd_segment_size:280,
-    init_win_bytes_forward:98, init_win_bytes_backward:16242, active_mean:806, idle_mean:294,
+
+  // ── DDoS ───────────────────────────────────────────────────────────────────
+  // SYN flood: 5ms flow, 2993 fwd pkts, 25-byte, 600K pkt/s
+  // dur=4992µs  fwd=2993 bwd=14 total=3007
+  // bytes_fwd=74825(25×2993) bytes_bwd=3682(263×14) total=78507
+  // pps = 3007/0.004992 = 602,163  bps = 78507/0.004992 = 15,726,506
+  // iat_mean = 4992/3006 ≈ 1.66µs
+  ddos: {
+    desc: 'DDoS SYN flood — 25-byte pkts, 600K pkt/s, IAT≈2µs. Expected: CRITICAL (score ~95).',
+    flow_duration:               4992,
+    total_fwd_packets:           2993,
+    total_backward_packets:        14,
+    total_length_fwd_packets:   74825,   // 25×2993
+    total_length_bwd_packets:    3682,   // 263×14
+    fwd_packet_length_mean:        25,
+    bwd_packet_length_mean:       263,
+    flow_bytes_per_s:          15726506, // 78507/0.004992
+    flow_packets_per_s:          602163, // 3007/0.004992
+    flow_iat_mean:                  1.7, // 4992/3006
+    flow_iat_std:                   1.0,
+    flow_iat_max:                  2500,
+    fwd_iat_mean:                   1.7, // 4992/2992
+    bwd_iat_mean:                 384.0, // 4992/13
+    fwd_packets_per_s:           599399, // 2993/0.004992
+    bwd_packets_per_s:             2804, // 14/0.004992
+    packet_length_mean:            26.1, // 78507/3007
+    packet_length_std:              50,
+    packet_length_variance:       2500,  // 50²
+    fin_flag_count:                   0,
+    syn_flag_count:                   1,
+    rst_flag_count:                   0,
+    psh_flag_count:                   0,
+    ack_flag_count:                   0,
+    average_packet_size:           26.1,
+    avg_fwd_segment_size:            25,
+    avg_bwd_segment_size:           263,
+    init_win_bytes_forward:          98,
+    init_win_bytes_backward:      16242,
+    active_mean:                    806,
+    idle_mean:                      294,
   },
-  bot: { desc:'C2 beacon — 80M µs duration, IAT Std=807µs (ultra-regular). Expected: HIGH (score ~74).',
-    flow_duration:80175886, total_fwd_packets:3, total_backward_packets:3,
-    total_length_fwd_packets:2205, total_length_bwd_packets:1792,
-    fwd_packet_length_mean:75, bwd_packet_length_mean:283, flow_bytes_per_s:302, flow_packets_per_s:0,
-    flow_iat_mean:15004141, flow_iat_std:807, flow_iat_max:790968,
-    fwd_iat_mean:199671, bwd_iat_mean:200504, fwd_packets_per_s:30, bwd_packets_per_s:25,
-    packet_length_mean:401, packet_length_std:202, packet_length_variance:39529, fin_flag_count:0,
-    syn_flag_count:0, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:399, avg_fwd_segment_size:301, avg_bwd_segment_size:278,
-    init_win_bytes_forward:508, init_win_bytes_backward:31751, active_mean:2998458, idle_mean:11974594,
+
+  // ── BOT / C2 BEACON ────────────────────────────────────────────────────────
+  // C2 heartbeat: 80s flow, 6 pkts total, ultra-regular IAT (low std)
+  // dur=80175886µs  fwd=3 bwd=3 total=6
+  // bytes_fwd=225(75×3) bytes_bwd=849(283×3) total=1074
+  // pps = 6/80.175 = 0.0748   bps = 1074/80.175 = 13.4
+  // iat_mean = 80175886/5 = 16,035,177  (super-regular → low std)
+  bot: {
+    desc: 'C2 beacon — 80s flow, 6 pkts, IAT≈16s (ultra-regular). Expected: HIGH (score ~70).',
+    flow_duration:           80175886,
+    total_fwd_packets:               3,
+    total_backward_packets:          3,
+    total_length_fwd_packets:      225,   // 75×3
+    total_length_bwd_packets:      849,   // 283×3
+    fwd_packet_length_mean:         75,
+    bwd_packet_length_mean:        283,
+    flow_bytes_per_s:             13.4,   // 1074/80.175
+    flow_packets_per_s:          0.075,   // 6/80.175
+    flow_iat_mean:            16035177,   // 80175886/5
+    flow_iat_std:                  807,   // ultra-regular → tiny std
+    flow_iat_max:             16040000,
+    fwd_iat_mean:             40087943,   // 80175886/2
+    bwd_iat_mean:             40087943,
+    fwd_packets_per_s:           0.037,  // 3/80.175
+    bwd_packets_per_s:           0.037,
+    packet_length_mean:            179,  // 1074/6
+    packet_length_std:             109,
+    packet_length_variance:      11881,  // 109²
+    fin_flag_count:                  0,
+    syn_flag_count:                  0,
+    rst_flag_count:                  0,
+    psh_flag_count:                  1,
+    ack_flag_count:                  1,
+    average_packet_size:           179,
+    avg_fwd_segment_size:           75,
+    avg_bwd_segment_size:          283,
+    init_win_bytes_forward:        508,
+    init_win_bytes_backward:     31751,
+    active_mean:                2998458,
+    idle_mean:                 11974594,
   },
-  heartbleed: { desc:'TLS heartbeat — 18-byte pkts, 8ms duration, zero window. Expected: MEDIUM (score ~38).',
-    flow_duration:8015, total_fwd_packets:3, total_backward_packets:3,
-    total_length_fwd_packets:55, total_length_bwd_packets:1794,
-    fwd_packet_length_mean:18, bwd_packet_length_mean:18, flow_bytes_per_s:4045, flow_packets_per_s:60,
-    flow_iat_mean:1986, flow_iat_std:178025, flow_iat_max:796646,
-    fwd_iat_mean:201270, bwd_iat_mean:200034, fwd_packets_per_s:29, bwd_packets_per_s:25,
-    packet_length_mean:18, packet_length_std:2, packet_length_variance:4, fin_flag_count:0,
-    syn_flag_count:1, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:403, avg_fwd_segment_size:302, avg_bwd_segment_size:278,
-    init_win_bytes_forward:0, init_win_bytes_backward:0, active_mean:101361, idle_mean:500928,
+
+  // ── HEARTBLEED ─────────────────────────────────────────────────────────────
+  // TLS heartbeat exploit: 8ms flow, 6 pkts, tiny payload, zero window
+  // dur=8015µs  fwd=3 bwd=3 total=6
+  // bytes_fwd=55(18×3) bytes_bwd=54(18×3) total=109 (attacker sends small hb req, gets big resp in reality
+  //   but at the flow feature level sizes are similar small probes)
+  // pps = 6/0.008015 = 748.6  bps = 109/0.008015 = 13600
+  // iat_mean = 8015/5 = 1603µs
+  heartbleed: {
+    desc: 'TLS Heartbleed — 8ms flow, 18-byte pkts, zero init window. Expected: HIGH (score ~64).',
+    flow_duration:               8015,
+    total_fwd_packets:              3,
+    total_backward_packets:         3,
+    total_length_fwd_packets:      54,   // 18×3
+    total_length_bwd_packets:      54,   // 18×3
+    fwd_packet_length_mean:        18,
+    bwd_packet_length_mean:        18,
+    flow_bytes_per_s:           13474,   // 108/0.008015
+    flow_packets_per_s:          748.6,  // 6/0.008015
+    flow_iat_mean:                1603,  // 8015/5
+    flow_iat_std:                  400,
+    flow_iat_max:                 4000,
+    fwd_iat_mean:                 4008,  // 8015/2
+    bwd_iat_mean:                 4008,
+    fwd_packets_per_s:           374.3,  // 3/0.008015
+    bwd_packets_per_s:           374.3,
+    packet_length_mean:             18,  // 108/6
+    packet_length_std:               2,
+    packet_length_variance:          4,  // 2²
+    fin_flag_count:                  0,
+    syn_flag_count:                  1,
+    rst_flag_count:                  0,
+    psh_flag_count:                  1,
+    ack_flag_count:                  1,
+    average_packet_size:            18,
+    avg_fwd_segment_size:           18,
+    avg_bwd_segment_size:           18,
+    init_win_bytes_forward:          0,  // key signal: zero window
+    init_win_bytes_backward:         0,
+    active_mean:                101361,
+    idle_mean:                  500928,
   },
-  slowloris: { desc:'Slow HTTP — 50M µs duration, 0.5 pkt/s, 80 bytes/s. Expected: HIGH (score ~64).',
-    flow_duration:49997101, total_fwd_packets:15, total_backward_packets:14,
-    total_length_fwd_packets:2190, total_length_bwd_packets:1799,
-    fwd_packet_length_mean:179, bwd_packet_length_mean:280, flow_bytes_per_s:81, flow_packets_per_s:1,
-    flow_iat_mean:4987802, flow_iat_std:198411, flow_iat_max:810402,
-    fwd_iat_mean:201925, bwd_iat_mean:197202, fwd_packets_per_s:30, bwd_packets_per_s:25,
-    packet_length_mean:398, packet_length_std:200, packet_length_variance:39745, fin_flag_count:0,
-    syn_flag_count:0, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:402, avg_fwd_segment_size:305, avg_bwd_segment_size:285,
-    init_win_bytes_forward:1031, init_win_bytes_backward:23717, active_mean:2032848, idle_mean:8041732,
+
+  // ── DoS SLOWLORIS ──────────────────────────────────────────────────────────
+  // Slow HTTP keep-alive: 50s flow, 29 pkts, 0.58 pkt/s (very slow)
+  // dur=49997101µs  fwd=15 bwd=14 total=29
+  // bytes_fwd=2685(179×15) bytes_bwd=3920(280×14) total=6605
+  // pps = 29/49.997 = 0.580  bps = 6605/49.997 = 132.1
+  // iat_mean = 49997101/28 = 1785611µs ≈ 1.8s between packets
+  slowloris: {
+    desc: 'DoS Slowloris — 50s flow, 0.58 pkt/s, IAT≈1.8s (keep-alive starvation). Expected: HIGH (score ~64).',
+    flow_duration:           49997101,
+    total_fwd_packets:              15,
+    total_backward_packets:         14,
+    total_length_fwd_packets:     2685,   // 179×15
+    total_length_bwd_packets:     3920,   // 280×14
+    fwd_packet_length_mean:        179,
+    bwd_packet_length_mean:        280,
+    flow_bytes_per_s:            132.1,   // 6605/49.997
+    flow_packets_per_s:           0.58,   // 29/49.997
+    flow_iat_mean:              1785611,  // 49997101/28
+    flow_iat_std:                198411,
+    flow_iat_max:               2100000,
+    fwd_iat_mean:               3571221,  // 49997101/14
+    bwd_iat_mean:               3846008,  // 49997101/13
+    fwd_packets_per_s:             0.30,  // 15/49.997
+    bwd_packets_per_s:             0.28,  // 14/49.997
+    packet_length_mean:           227.8,  // 6605/29
+    packet_length_std:             200,
+    packet_length_variance:      40000,   // 200²
+    fin_flag_count:                   0,
+    syn_flag_count:                   0,
+    rst_flag_count:                   0,
+    psh_flag_count:                   1,
+    ack_flag_count:                   1,
+    average_packet_size:           227.8,
+    avg_fwd_segment_size:           179,
+    avg_bwd_segment_size:           280,
+    init_win_bytes_forward:        1031,
+    init_win_bytes_backward:      23717,
+    active_mean:                2032848,
+    idle_mean:                  8041732,
   },
-  ftp: { desc:'FTP brute-force — 55-byte auth pkts, 3 pkt/s, large Fwd IAT. Expected: MEDIUM (score ~43).',
-    flow_duration:3997230, total_fwd_packets:10, total_backward_packets:14,
-    total_length_fwd_packets:2214, total_length_bwd_packets:1822,
-    fwd_packet_length_mean:55, bwd_packet_length_mean:85, flow_bytes_per_s:1506, flow_packets_per_s:3,
-    flow_iat_mean:218684, flow_iat_std:178468, flow_iat_max:802372,
-    fwd_iat_mean:2997275, bwd_iat_mean:3034494, fwd_packets_per_s:30, bwd_packets_per_s:25,
-    packet_length_mean:401, packet_length_std:200, packet_length_variance:39152, fin_flag_count:0,
-    syn_flag_count:0, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:401, avg_fwd_segment_size:306, avg_bwd_segment_size:281,
-    init_win_bytes_forward:32119, init_win_bytes_backward:32187, active_mean:101078, idle_mean:497148,
+
+  // ── FTP BRUTE FORCE ────────────────────────────────────────────────────────
+  // FTP auth attempts: 4s flow, 24 pkts, 6 pkt/s, small auth packets
+  // dur=3997230µs  fwd=10 bwd=14 total=24
+  // bytes_fwd=550(55×10) bytes_bwd=1190(85×14) total=1740
+  // pps = 24/3.997 = 6.005  bps = 1740/3.997 = 435.3
+  // iat_mean = 3997230/23 = 173793µs
+  ftp: {
+    desc: 'FTP brute-force — 4s flow, 55-byte auth pkts, 6 pkt/s. Expected: MEDIUM (score ~43).',
+    flow_duration:             3997230,
+    total_fwd_packets:              10,
+    total_backward_packets:         14,
+    total_length_fwd_packets:      550,   // 55×10
+    total_length_bwd_packets:     1190,   // 85×14
+    fwd_packet_length_mean:         55,
+    bwd_packet_length_mean:         85,
+    flow_bytes_per_s:            435.3,   // 1740/3.997
+    flow_packets_per_s:            6.0,   // 24/3.997
+    flow_iat_mean:              173793,   // 3997230/23
+    flow_iat_std:               178468,
+    flow_iat_max:               900000,
+    fwd_iat_mean:               444137,   // 3997230/9
+    bwd_iat_mean:               307479,   // 3997230/13
+    fwd_packets_per_s:             2.50,  // 10/3.997
+    bwd_packets_per_s:             3.50,  // 14/3.997
+    packet_length_mean:            72.5,  // 1740/24
+    packet_length_std:              20,
+    packet_length_variance:        400,   // 20²
+    fin_flag_count:                   0,
+    syn_flag_count:                   0,
+    rst_flag_count:                   0,
+    psh_flag_count:                   1,
+    ack_flag_count:                   1,
+    average_packet_size:            72.5,
+    avg_fwd_segment_size:            55,
+    avg_bwd_segment_size:            85,
+    init_win_bytes_forward:       32119,
+    init_win_bytes_backward:      32187,
+    active_mean:                  101078,
+    idle_mean:                    497148,
   },
-  ssh: { desc:'SSH brute-force — 75-byte pkts, 4 pkt/s, large Fwd IAT=3M µs. Expected: MEDIUM (score ~48).',
-    flow_duration:3006250, total_fwd_packets:10, total_backward_packets:14,
-    total_length_fwd_packets:2214, total_length_bwd_packets:1822,
-    fwd_packet_length_mean:75, bwd_packet_length_mean:85, flow_bytes_per_s:1790, flow_packets_per_s:4,
-    flow_iat_mean:218684, flow_iat_std:178468, flow_iat_max:802372,
-    fwd_iat_mean:2997275, bwd_iat_mean:3034494, fwd_packets_per_s:30, bwd_packets_per_s:25,
-    packet_length_mean:80, packet_length_std:200, packet_length_variance:39152, fin_flag_count:0,
-    syn_flag_count:0, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:80, avg_fwd_segment_size:75, avg_bwd_segment_size:85,
-    init_win_bytes_forward:1024, init_win_bytes_backward:2048, active_mean:101078, idle_mean:497148,
+
+  // ── SSH BRUTE FORCE ────────────────────────────────────────────────────────
+  // SSH auth loop: 3s flow, 24 pkts, 8 pkt/s, slightly larger than FTP
+  // dur=3006250µs  fwd=10 bwd=14 total=24
+  // bytes_fwd=750(75×10) bytes_bwd=1190(85×14) total=1940
+  // pps = 24/3.006 = 7.98  bps = 1940/3.006 = 645.4
+  // iat_mean = 3006250/23 = 130707µs
+  ssh: {
+    desc: 'SSH brute-force — 3s flow, 75-byte auth pkts, 8 pkt/s. Expected: MEDIUM (score ~49).',
+    flow_duration:             3006250,
+    total_fwd_packets:              10,
+    total_backward_packets:         14,
+    total_length_fwd_packets:      750,   // 75×10
+    total_length_bwd_packets:     1190,   // 85×14
+    fwd_packet_length_mean:         75,
+    bwd_packet_length_mean:         85,
+    flow_bytes_per_s:            645.4,   // 1940/3.006
+    flow_packets_per_s:            7.98,  // 24/3.006
+    flow_iat_mean:               130707,  // 3006250/23
+    flow_iat_std:                178468,
+    flow_iat_max:                800000,
+    fwd_iat_mean:                334028,  // 3006250/9
+    bwd_iat_mean:                231250,  // 3006250/13
+    fwd_packets_per_s:             3.33,  // 10/3.006
+    bwd_packets_per_s:             4.66,  // 14/3.006
+    packet_length_mean:            80.8,  // 1940/24
+    packet_length_std:              10,
+    packet_length_variance:        100,   // 10²
+    fin_flag_count:                   0,
+    syn_flag_count:                   0,
+    rst_flag_count:                   0,
+    psh_flag_count:                   1,
+    ack_flag_count:                   1,
+    average_packet_size:            80.8,
+    avg_fwd_segment_size:            75,
+    avg_bwd_segment_size:            85,
+    init_win_bytes_forward:        1024,
+    init_win_bytes_backward:       2048,
+    active_mean:                  101078,
+    idle_mean:                    497148,
   },
-  infiltration: { desc:'Data exfil — 1200-byte pkts, 500K bytes/s upstream. Expected: HIGH (score ~72).',
-    flow_duration:6012946, total_fwd_packets:497, total_backward_packets:14,
-    total_length_fwd_packets:598559, total_length_bwd_packets:1820,
-    fwd_packet_length_mean:1195, bwd_packet_length_mean:278, flow_bytes_per_s:500475, flow_packets_per_s:61,
-    flow_iat_mean:222718, flow_iat_std:181842, flow_iat_max:795707,
-    fwd_iat_mean:200630, bwd_iat_mean:201449, fwd_packets_per_s:30, bwd_packets_per_s:25,
-    packet_length_mean:1100, packet_length_std:199, packet_length_variance:39640, fin_flag_count:1,
-    syn_flag_count:1, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:399, avg_fwd_segment_size:298, avg_bwd_segment_size:277,
-    init_win_bytes_forward:31455, init_win_bytes_backward:33130, active_mean:99546, idle_mean:498398,
+
+  // ── DATA EXFILTRATION ──────────────────────────────────────────────────────
+  // Bulk upload: 6s flow, 511 pkts, highly asymmetric (big fwd, tiny bwd)
+  // dur=6012946µs  fwd=497 bwd=14 total=511
+  // bytes_fwd=594059(1195×497) bytes_bwd=3892(278×14) total=597951
+  // pps = 511/6.013 = 84.98  bps = 597951/6.013 = 99443
+  // iat_mean = 6012946/510 = 11790µs
+  infiltration: {
+    desc: 'Data exfiltration — 6s flow, 1195-byte fwd pkts, 85 pkt/s upstream. Expected: HIGH (score ~72).',
+    flow_duration:             6012946,
+    total_fwd_packets:             497,
+    total_backward_packets:         14,
+    total_length_fwd_packets:   594059,   // 1195×497
+    total_length_bwd_packets:     3892,   // 278×14
+    fwd_packet_length_mean:       1195,
+    bwd_packet_length_mean:        278,
+    flow_bytes_per_s:            99443,   // 597951/6.013
+    flow_packets_per_s:           84.98,  // 511/6.013
+    flow_iat_mean:                11790,  // 6012946/510
+    flow_iat_std:                 18184,
+    flow_iat_max:                100000,
+    fwd_iat_mean:                 12123,  // 6012946/496
+    bwd_iat_mean:                461765,  // 6012946/13
+    fwd_packets_per_s:            82.65,  // 497/6.013
+    bwd_packets_per_s:             2.33,  // 14/6.013
+    packet_length_mean:          1170.2,  // 597951/511
+    packet_length_std:             199,
+    packet_length_variance:      39601,   // 199²
+    fin_flag_count:                   1,
+    syn_flag_count:                   1,
+    rst_flag_count:                   0,
+    psh_flag_count:                   1,
+    ack_flag_count:                   1,
+    average_packet_size:          1170.2,
+    avg_fwd_segment_size:          1195,
+    avg_bwd_segment_size:           278,
+    init_win_bytes_forward:       31455,
+    init_win_bytes_backward:      33130,
+    active_mean:                   99546,
+    idle_mean:                    498398,
   },
-  goldeneye: { desc:'DoS GoldenEye — HTTP keep-alive, IAT=2500µs. Expected: MEDIUM (score ~40).',
-    flow_duration:39272, total_fwd_packets:605, total_backward_packets:14,
-    total_length_fwd_packets:2193, total_length_bwd_packets:1786,
-    fwd_packet_length_mean:598, bwd_packet_length_mean:280, flow_bytes_per_s:1200250, flow_packets_per_s:15013,
-    flow_iat_mean:2493, flow_iat_std:1204, flow_iat_max:799420,
-    fwd_iat_mean:201308, bwd_iat_mean:201943, fwd_packets_per_s:30, bwd_packets_per_s:25,
-    packet_length_mean:399, packet_length_std:201, packet_length_variance:40166, fin_flag_count:0,
-    syn_flag_count:0, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:407, avg_fwd_segment_size:305, avg_bwd_segment_size:287,
-    init_win_bytes_forward:31150, init_win_bytes_backward:16953, active_mean:99602, idle_mean:498437,
+
+  // ── DoS GOLDENEYE ──────────────────────────────────────────────────────────
+  // HTTP keep-alive flood: 39ms flow, 619 pkts, 15K pkt/s
+  // dur=39272µs  fwd=605 bwd=14 total=619
+  // bytes_fwd=361990(598×605) bytes_bwd=3920(280×14) total=365910
+  // pps = 619/0.039272 = 15762  bps = 365910/0.039272 = 9316760
+  // iat_mean = 39272/618 = 63.5µs
+  goldeneye: {
+    desc: 'DoS GoldenEye — HTTP keep-alive, 15K pkt/s, IAT≈64µs. Expected: MEDIUM (score ~40).',
+    flow_duration:               39272,
+    total_fwd_packets:             605,
+    total_backward_packets:         14,
+    total_length_fwd_packets:   361990,   // 598×605
+    total_length_bwd_packets:     3920,   // 280×14
+    fwd_packet_length_mean:        598,
+    bwd_packet_length_mean:        280,
+    flow_bytes_per_s:           9316760,  // 365910/0.039272
+    flow_packets_per_s:           15762,  // 619/0.039272
+    flow_iat_mean:                 63.5,  // 39272/618
+    flow_iat_std:                  32.0,
+    flow_iat_max:                  5000,
+    fwd_iat_mean:                  65.0,  // 39272/604
+    bwd_iat_mean:                3020.2,  // 39272/13
+    fwd_packets_per_s:            15407,  // 605/0.039272
+    bwd_packets_per_s:              356,  // 14/0.039272
+    packet_length_mean:            591.1, // 365910/619
+    packet_length_std:              201,
+    packet_length_variance:       40401,  // 201²
+    fin_flag_count:                   0,
+    syn_flag_count:                   0,
+    rst_flag_count:                   0,
+    psh_flag_count:                   1,
+    ack_flag_count:                   1,
+    average_packet_size:           591.1,
+    avg_fwd_segment_size:           598,
+    avg_bwd_segment_size:           280,
+    init_win_bytes_forward:       31150,
+    init_win_bytes_backward:      16953,
+    active_mean:                   99602,
+    idle_mean:                    498437,
   },
-  icmpflood: { desc:'ICMP flood — 64-byte fixed pkts, 625K pkt/s. Expected: CRITICAL (score ~97).',
-    flow_duration:8040, total_fwd_packets:5046, total_backward_packets:0,
-    total_length_fwd_packets:320095, total_length_bwd_packets:0,
-    fwd_packet_length_mean:64, bwd_packet_length_mean:0, flow_bytes_per_s:40049675, flow_packets_per_s:624804,
-    flow_iat_mean:161, flow_iat_std:80, flow_iat_max:792663,
-    fwd_iat_mean:199032, bwd_iat_mean:200863, fwd_packets_per_s:626028, bwd_packets_per_s:0,
-    packet_length_mean:64, packet_length_std:2, packet_length_variance:4, fin_flag_count:0,
-    syn_flag_count:0, rst_flag_count:0, psh_flag_count:0, ack_flag_count:0,
-    average_packet_size:404, avg_fwd_segment_size:295, avg_bwd_segment_size:280,
-    init_win_bytes_forward:0, init_win_bytes_backward:0, active_mean:1005, idle_mean:502,
+
+  // ── ICMP FLOOD ─────────────────────────────────────────────────────────────
+  // ICMP ping flood: 8ms flow, 5046 pkts, 628K pkt/s, zero backward
+  // dur=8040µs  fwd=5046 bwd=0 total=5046
+  // bytes_fwd=322944(64×5046) total=322944
+  // pps = 5046/0.008040 = 627611  bps = 322944/0.008040 = 40168...
+  // iat_mean = 8040/5045 ≈ 1.59µs
+  icmpflood: {
+    desc: 'ICMP flood — 64-byte fixed pkts, 628K pkt/s, IAT≈1.6µs. Expected: CRITICAL (score ~97).',
+    flow_duration:                8040,
+    total_fwd_packets:            5046,
+    total_backward_packets:          0,
+    total_length_fwd_packets:   322944,  // 64×5046
+    total_length_bwd_packets:        0,
+    fwd_packet_length_mean:         64,
+    bwd_packet_length_mean:          0,
+    flow_bytes_per_s:           40167910,  // 322944/0.008040
+    flow_packets_per_s:           627611,  // 5046/0.008040
+    flow_iat_mean:                   1.59, // 8040/5045
+    flow_iat_std:                    0.80,
+    flow_iat_max:                    2000,
+    fwd_iat_mean:                    1.59,
+    bwd_iat_mean:                       0,
+    fwd_packets_per_s:             627611, // 5046/0.008040
+    bwd_packets_per_s:                  0,
+    packet_length_mean:                64, // 322944/5046
+    packet_length_std:                  2,
+    packet_length_variance:             4, // 2²
+    fin_flag_count:                     0,
+    syn_flag_count:                     0,
+    rst_flag_count:                     0,
+    psh_flag_count:                     0,
+    ack_flag_count:                     0,
+    average_packet_size:               64,
+    avg_fwd_segment_size:              64,
+    avg_bwd_segment_size:               0,
+    init_win_bytes_forward:             0,
+    init_win_bytes_backward:            0,
+    active_mean:                     1005,
+    idle_mean:                        502,
   },
-  dnstunnel: { desc:'DNS tunneling — 60-byte pkts, 10M µs duration. Expected: CRITICAL (score ~84).',
-    flow_duration:10123364, total_fwd_packets:199, total_backward_packets:180,
-    total_length_fwd_packets:11942, total_length_bwd_packets:21790,
-    fwd_packet_length_mean:60, bwd_packet_length_mean:120, flow_bytes_per_s:3002, flow_packets_per_s:35,
-    flow_iat_mean:49850, flow_iat_std:25279, flow_iat_max:795420,
-    fwd_iat_mean:198587, bwd_iat_mean:199424, fwd_packets_per_s:18, bwd_packets_per_s:17,
-    packet_length_mean:90, packet_length_std:40, packet_length_variance:1575, fin_flag_count:0,
-    syn_flag_count:0, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:89, avg_fwd_segment_size:60, avg_bwd_segment_size:120,
-    init_win_bytes_forward:32611, init_win_bytes_backward:31557, active_mean:99134, idle_mean:496968,
+
+  // ── DNS TUNNELING ──────────────────────────────────────────────────────────
+  // Covert channel via DNS: 10s flow, 379 pkts, 37 pkt/s, balanced fwd/bwd
+  // dur=10123364µs  fwd=199 bwd=180 total=379
+  // bytes_fwd=11940(60×199) bytes_bwd=21600(120×180) total=33540
+  // pps = 379/10.123 = 37.44  bps = 33540/10.123 = 3313.5
+  // iat_mean = 10123364/378 = 26784µs
+  dnstunnel: {
+    desc: 'DNS tunneling — 10s flow, 60/120-byte pkts, 37 pkt/s (covert channel). Expected: CRITICAL (score ~84).',
+    flow_duration:            10123364,
+    total_fwd_packets:             199,
+    total_backward_packets:        180,
+    total_length_fwd_packets:    11940,  // 60×199
+    total_length_bwd_packets:    21600,  // 120×180
+    fwd_packet_length_mean:         60,
+    bwd_packet_length_mean:        120,
+    flow_bytes_per_s:            3314,   // 33540/10.123
+    flow_packets_per_s:           37.4,  // 379/10.123
+    flow_iat_mean:               26784,  // 10123364/378
+    flow_iat_std:                25279,
+    flow_iat_max:               200000,
+    fwd_iat_mean:                51128,  // 10123364/198
+    bwd_iat_mean:                56352,  // 10123364/179 (approx)
+    fwd_packets_per_s:            19.66, // 199/10.123
+    bwd_packets_per_s:            17.78, // 180/10.123
+    packet_length_mean:            88.5, // 33540/379
+    packet_length_std:              40,
+    packet_length_variance:       1600,  // 40²
+    fin_flag_count:                   0,
+    syn_flag_count:                   0,
+    rst_flag_count:                   0,
+    psh_flag_count:                   1,
+    ack_flag_count:                   1,
+    average_packet_size:            88.5,
+    avg_fwd_segment_size:            60,
+    avg_bwd_segment_size:           120,
+    init_win_bytes_forward:       32611,
+    init_win_bytes_backward:      31557,
+    active_mean:                   99134,
+    idle_mean:                    496968,
   },
-  mssql: { desc:'MSSQL brute — 3 pkts, SYN+RST, zero window, 2ms flow. Expected: CRITICAL (score ~86).',
-    flow_duration:2016, total_fwd_packets:3, total_backward_packets:2,
-    total_length_fwd_packets:122, total_length_bwd_packets:81,
-    fwd_packet_length_mean:40, bwd_packet_length_mean:39, flow_bytes_per_s:80399, flow_packets_per_s:1994,
-    flow_iat_mean:602, flow_iat_std:300, flow_iat_max:797826,
-    fwd_iat_mean:198156, bwd_iat_mean:198352, fwd_packets_per_s:1480, bwd_packets_per_s:793,
-    packet_length_mean:40, packet_length_std:5, packet_length_variance:25, fin_flag_count:0,
-    syn_flag_count:1, rst_flag_count:1, psh_flag_count:0, ack_flag_count:0,
-    average_packet_size:398, avg_fwd_segment_size:296, avg_bwd_segment_size:281,
-    init_win_bytes_forward:0, init_win_bytes_backward:0, active_mean:504, idle_mean:999,
+
+  // ── MSSQL BRUTE FORCE ──────────────────────────────────────────────────────
+  // Port 1433 SYN+RST probe: 2ms flow, 5 pkts, zero window
+  // dur=2016µs  fwd=3 bwd=2 total=5
+  // bytes_fwd=120(40×3) bytes_bwd=80(40×2) total=200
+  // pps = 5/0.002016 = 2480.2  bps = 200/0.002016 = 99206
+  // iat_mean = 2016/4 = 504µs
+  mssql: {
+    desc: 'MSSQL brute-force — 2ms flow, SYN+RST, zero window, port 1433. Expected: CRITICAL (score ~86).',
+    flow_duration:               2016,
+    total_fwd_packets:              3,
+    total_backward_packets:         2,
+    total_length_fwd_packets:     120,   // 40×3
+    total_length_bwd_packets:      80,   // 40×2
+    fwd_packet_length_mean:        40,
+    bwd_packet_length_mean:        40,
+    flow_bytes_per_s:            99206,  // 200/0.002016
+    flow_packets_per_s:           2480,  // 5/0.002016
+    flow_iat_mean:                 504,  // 2016/4
+    flow_iat_std:                  300,
+    flow_iat_max:                 1200,
+    fwd_iat_mean:                 1008,  // 2016/2
+    bwd_iat_mean:                 2016,  // 2016/1
+    fwd_packets_per_s:            1488,  // 3/0.002016
+    bwd_packets_per_s:             992,  // 2/0.002016
+    packet_length_mean:             40,  // 200/5
+    packet_length_std:               5,
+    packet_length_variance:         25,  // 5²
+    fin_flag_count:                  0,
+    syn_flag_count:                  1,
+    rst_flag_count:                  1,
+    psh_flag_count:                  0,
+    ack_flag_count:                  0,
+    average_packet_size:            40,
+    avg_fwd_segment_size:           40,
+    avg_bwd_segment_size:           40,
+    init_win_bytes_forward:          0,  // zero window — key signal
+    init_win_bytes_backward:         0,
+    active_mean:                   504,
+    idle_mean:                     999,
   },
-  webxss: { desc:'XSS attack — 615-byte fwd pkts, PSH+ACK. Expected: MEDIUM (score ~49).',
-    flow_duration:302542, total_fwd_packets:60, total_backward_packets:50,
-    total_length_fwd_packets:28445, total_length_bwd_packets:22101,
-    fwd_packet_length_mean:615, bwd_packet_length_mean:438, flow_bytes_per_s:60231, flow_packets_per_s:80,
-    flow_iat_mean:14935, flow_iat_std:11963, flow_iat_max:795324,
-    fwd_iat_mean:200433, bwd_iat_mean:199191, fwd_packets_per_s:56, bwd_packets_per_s:45,
-    packet_length_mean:462, packet_length_std:179, packet_length_variance:33098, fin_flag_count:1,
-    syn_flag_count:1, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:460, avg_fwd_segment_size:615, avg_bwd_segment_size:443,
-    init_win_bytes_forward:32140, init_win_bytes_backward:31688, active_mean:100134, idle_mean:501738,
+
+  // ── WEB XSS ────────────────────────────────────────────────────────────────
+  // XSS injection via HTTP: 302ms flow, 110 pkts, 364 pkt/s
+  // dur=302542µs  fwd=60 bwd=50 total=110
+  // bytes_fwd=36900(615×60) bytes_bwd=21900(438×50) total=58800
+  // pps = 110/0.302542 = 363.6  bps = 58800/0.302542 = 194355
+  // iat_mean = 302542/109 = 2775µs
+  webxss: {
+    desc: 'Web XSS — 615-byte fwd pkts, 364 pkt/s, PSH+ACK. Expected: HIGH (score ~73).',
+    flow_duration:              302542,
+    total_fwd_packets:              60,
+    total_backward_packets:         50,
+    total_length_fwd_packets:    36900,  // 615×60
+    total_length_bwd_packets:    21900,  // 438×50
+    fwd_packet_length_mean:        615,
+    bwd_packet_length_mean:        438,
+    flow_bytes_per_s:           194355,  // 58800/0.302542
+    flow_packets_per_s:            364,  // 110/0.302542
+    flow_iat_mean:                2775,  // 302542/109
+    flow_iat_std:                11963,
+    flow_iat_max:               100000,
+    fwd_iat_mean:                 5127,  // 302542/59
+    bwd_iat_mean:                 6174,  // 302542/49
+    fwd_packets_per_s:             198,  // 60/0.302542
+    bwd_packets_per_s:             165,  // 50/0.302542
+    packet_length_mean:            535,  // 58800/110
+    packet_length_std:             179,
+    packet_length_variance:      32041,  // 179²
+    fin_flag_count:                   1,
+    syn_flag_count:                   1,
+    rst_flag_count:                   0,
+    psh_flag_count:                   1,
+    ack_flag_count:                   1,
+    average_packet_size:            535,
+    avg_fwd_segment_size:           615,
+    avg_bwd_segment_size:           438,
+    init_win_bytes_forward:       32140,
+    init_win_bytes_backward:      31688,
+    active_mean:                  100134,
+    idle_mean:                    501738,
   },
-  websqli: { desc:'SQL injection — 748-byte fwd pkts, PSH+ACK. Expected: MEDIUM (score ~52).',
-    flow_duration:201644, total_fwd_packets:40, total_backward_packets:50,
-    total_length_fwd_packets:28445, total_length_bwd_packets:22101,
-    fwd_packet_length_mean:748, bwd_packet_length_mean:438, flow_bytes_per_s:60231, flow_packets_per_s:99,
-    flow_iat_mean:14935, flow_iat_std:11963, flow_iat_max:795324,
-    fwd_iat_mean:200433, bwd_iat_mean:199191, fwd_packets_per_s:56, bwd_packets_per_s:45,
-    packet_length_mean:462, packet_length_std:179, packet_length_variance:33098, fin_flag_count:1,
-    syn_flag_count:1, rst_flag_count:0, psh_flag_count:1, ack_flag_count:1,
-    average_packet_size:460, avg_fwd_segment_size:748, avg_bwd_segment_size:443,
-    init_win_bytes_forward:32140, init_win_bytes_backward:31688, active_mean:100134, idle_mean:501738,
+
+  // ── WEB SQL INJECTION ──────────────────────────────────────────────────────
+  // SQLi via HTTP POST: 202ms flow, 90 pkts, 447 pkt/s, larger fwd payload
+  // dur=201644µs  fwd=40 bwd=50 total=90
+  // bytes_fwd=29920(748×40) bytes_bwd=21900(438×50) total=51820
+  // pps = 90/0.201644 = 446.3  bps = 51820/0.201644 = 257002
+  // iat_mean = 201644/89 = 2265µs
+  websqli: {
+    desc: 'SQL injection — 748-byte fwd pkts, 446 pkt/s, PSH+ACK. Expected: HIGH (score ~74).',
+    flow_duration:              201644,
+    total_fwd_packets:              40,
+    total_backward_packets:         50,
+    total_length_fwd_packets:    29920,  // 748×40
+    total_length_bwd_packets:    21900,  // 438×50
+    fwd_packet_length_mean:        748,
+    bwd_packet_length_mean:        438,
+    flow_bytes_per_s:           257002,  // 51820/0.201644
+    flow_packets_per_s:          446.3,  // 90/0.201644
+    flow_iat_mean:                2265,  // 201644/89
+    flow_iat_std:                11963,
+    flow_iat_max:               100000,
+    fwd_iat_mean:                 5170,  // 201644/39
+    bwd_iat_mean:                 4115,  // 201644/49
+    fwd_packets_per_s:            198.4, // 40/0.201644
+    bwd_packets_per_s:            248.0, // 50/0.201644
+    packet_length_mean:            576.9, // 51820/90
+    packet_length_std:              179,
+    packet_length_variance:       32041,  // 179²
+    fin_flag_count:                   1,
+    syn_flag_count:                   1,
+    rst_flag_count:                   0,
+    psh_flag_count:                   1,
+    ack_flag_count:                   1,
+    average_packet_size:           576.9,
+    avg_fwd_segment_size:           748,
+    avg_bwd_segment_size:           438,
+    init_win_bytes_forward:       32140,
+    init_win_bytes_backward:      31688,
+    active_mean:                  100134,
+    idle_mean:                    501738,
   },
+
 };
 
 function loadScenario() {
