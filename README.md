@@ -18,7 +18,6 @@
 | Platform | Link |
 |---|---|
 | Web App (Render) | `https://zerosight.onrender.com` |
-| Demo Video | [Google Drive / YouTube link] |
 | GitHub | `https://github.com/Sudeep72/ZeroSight` |
 
 ---
