@@ -17,7 +17,7 @@
 
 | Platform | Link |
 |---|---|
-| Web App (Render) | `https://zerosight.onrender.com` |
+| Web App (Render) | `https://zerosight-vd8d.onrender.com` |
 | GitHub | `https://github.com/Sudeep72/ZeroSight` |
 
 ---
